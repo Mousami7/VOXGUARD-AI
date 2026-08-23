@@ -1,0 +1,1 @@
+"""VoxGuard-AI application package."""
