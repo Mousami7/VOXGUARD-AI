@@ -31,6 +31,8 @@ data/audio/*
 !data/audio/.gitkeep
 data/documents/*
 !data/documents/.gitkeep
+data/chroma/*
+!data/chroma/.gitkeep
 
 # OS and editor
 .DS_Store
