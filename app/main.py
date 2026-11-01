@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.audio import router as audio_router
+from app.api.cases import router as cases_router
 from app.api.documents import router as documents_router
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -17,6 +18,7 @@ app = FastAPI(
 app.add_middleware(RequestContextMiddleware)
 app.include_router(audio_router)
 app.include_router(documents_router)
+app.include_router(cases_router)
 
 
 @app.get("/")

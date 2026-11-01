@@ -10,7 +10,7 @@ from app.services.llm import REFUSAL_MESSAGE
 
 
 def test_query_knowledge_response_structure(monkeypatch: MonkeyPatch) -> None:
-    def fake_documents(_question: str, _top_k: int) -> List[Dict[str, Any]]:
+    def fake_documents(_question: str, _top_k: int, case_id=None) -> List[Dict[str, Any]]:
         return [
             {
                 "source": "policy.txt",
@@ -33,7 +33,7 @@ def test_query_knowledge_response_structure(monkeypatch: MonkeyPatch) -> None:
 
 
 def test_query_knowledge_empty_sources(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setattr(rag, "_search_documents", lambda _q, _k: [])
+    monkeypatch.setattr(rag, "_search_documents", lambda _q, _k, case_id=None: [])
     result = rag.query_knowledge("unknown topic")
     assert result["sources"] == []
     assert result["mode"] == "refused"
@@ -44,7 +44,7 @@ def test_query_knowledge_weak_evidence_is_refused(monkeypatch: MonkeyPatch) -> N
     monkeypatch.setattr(
         rag,
         "_search_documents",
-        lambda _q, _k: [{"source": "policy.txt", "text": "unrelated", "score": 0.05}],
+        lambda _q, _k, case_id=None: [{"source": "policy.txt", "text": "unrelated", "score": 0.05}],
     )
     monkeypatch.setattr(settings, "min_evidence_score", 0.25)
     result = rag.query_knowledge("Where is parking?")
@@ -57,7 +57,7 @@ def test_query_knowledge_merges_transcript_sources(monkeypatch: MonkeyPatch) -> 
     monkeypatch.setattr(
         rag,
         "_search_documents",
-        lambda _q, _k: [
+        lambda _q, _k, case_id=None: [
             {"source": "policy.txt", "text": "from document", "score": 0.2}
         ],
     )
@@ -79,7 +79,7 @@ def test_query_knowledge_uses_grounded_llm(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
         rag,
         "_search_documents",
-        lambda _q, _k: [
+        lambda _q, _k, case_id=None: [
             {
                 "source": "policy.txt",
                 "text": "Visitor parking is behind Building B.",
@@ -103,7 +103,7 @@ def test_query_knowledge_falls_back_when_llm_fails(monkeypatch: MonkeyPatch) -> 
     monkeypatch.setattr(
         rag,
         "_search_documents",
-        lambda _q, _k: [
+        lambda _q, _k, case_id=None: [
             {"source": "policy.txt", "text": "Visitor parking is behind Building B.", "score": 0.51}
         ],
     )
@@ -116,3 +116,16 @@ def test_query_knowledge_falls_back_when_llm_fails(monkeypatch: MonkeyPatch) -> 
     result = rag.query_knowledge("Where is parking?")
     assert result["mode"] == "extractive"
     assert result["answer"].startswith("Based on the available sources:")
+
+
+def test_query_knowledge_forwards_case_id(monkeypatch: MonkeyPatch) -> None:
+    seen = {}
+
+    def fake_documents(_question: str, _top_k: int, case_id=None):
+        seen["case_id"] = case_id
+        return [{"source": "policy.txt", "text": "covered", "score": 0.6}]
+
+    monkeypatch.setattr(rag, "_search_documents", fake_documents)
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    rag.query_knowledge("Is it covered?", case_id="case-123")
+    assert seen["case_id"] == "case-123"
