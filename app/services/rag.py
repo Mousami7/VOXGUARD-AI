@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.llm import REFUSAL_MESSAGE, generate_grounded_answer, is_llm_configured
 
 logger = get_logger("rag")
 
@@ -17,6 +18,8 @@ _chroma_client = None
 _collection = None
 
 COLLECTION_NAME = "voxguard_documents"
+NO_SOURCES_MESSAGE = "I could not find relevant information in the uploaded documents."
+EXTRACTIVE_PREFIX = "Based on the available sources:\n\n"
 
 
 def get_embedding_model() -> SentenceTransformer:
@@ -196,12 +199,23 @@ def _search_transcription(question: str, transcription: str, top_k: int) -> List
     return matches
 
 
+def _has_enough_evidence(matches: List[Dict[str, Any]]) -> bool:
+    if not matches:
+        return False
+    return max(float(match.get("score") or 0.0) for match in matches) >= settings.min_evidence_score
+
+
+def _extractive_answer(matches: List[Dict[str, Any]]) -> str:
+    excerpts = [match["text"] for match in matches]
+    return EXTRACTIVE_PREFIX + "\n\n".join(excerpts)
+
+
 def query_knowledge(
     question: str,
     top_k: int = 4,
     transcription: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Retrieve the most relevant document (and optional transcript) chunks.
+    """Retrieve passages, then optionally generate a grounded LLM answer.
 
     Document hits use Chroma L2 distance converted with 1/(1+d).
     Transcript hits use cosine similarity. Those scores are merged by numeric
@@ -218,14 +232,30 @@ def query_knowledge(
         matches = matches[:top_k]
 
         if not matches:
-            answer = "I could not find relevant information in the uploaded documents."
+            answer = NO_SOURCES_MESSAGE
+            mode = "refused"
+        elif not _has_enough_evidence(matches):
+            answer = REFUSAL_MESSAGE
+            mode = "refused"
+        elif is_llm_configured():
+            try:
+                answer = generate_grounded_answer(question, matches)
+                mode = "generative"
+            except Exception:
+                logger.exception(
+                    "llm_fallback_extractive error_category=llm source_count=%s",
+                    len(matches),
+                )
+                answer = _extractive_answer(matches)
+                mode = "extractive"
         else:
-            excerpts = [match["text"] for match in matches]
-            answer = "Based on the available sources:\n\n" + "\n\n".join(excerpts)
+            answer = _extractive_answer(matches)
+            mode = "extractive"
 
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         logger.info(
-            "query_completed error_category=none source_count=%s duration_ms=%s",
+            "query_completed error_category=none mode=%s source_count=%s duration_ms=%s",
+            mode,
             len(matches),
             duration_ms,
         )
@@ -233,6 +263,7 @@ def query_knowledge(
             "question": question,
             "answer": answer,
             "sources": matches,
+            "mode": mode,
         }
     except Exception:
         duration_ms = round((time.perf_counter() - started) * 1000, 1)

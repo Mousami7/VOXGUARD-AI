@@ -35,3 +35,4 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     sources: List[SourceChunk]
+    mode: str = "extractive"
