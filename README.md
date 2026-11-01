@@ -2,7 +2,7 @@
 
 Voice-aware AI application for processing audio recordings and documents.
 
-This repository is an independent portfolio project. It currently provides a FastAPI backend that transcribes audio with Whisper and retrieves relevant document (and optional transcript) passages with extractive RAG.
+This repository is an independent portfolio project. It currently provides a FastAPI backend that transcribes audio with Whisper, retrieves document passages with MiniLM + Chroma, and can generate a source-grounded LLM answer when an API key is configured.
 
 ## Current architecture
 
@@ -22,7 +22,11 @@ Ask a question -----------------------+
                                       |
                                       v
                          Retrieve top-k passages
-                         (extractive answer, not an LLM)
+                                      |
+                                      v
+                    If evidence is weak: refuse
+                    If OPENAI_API_KEY is set: grounded LLM answer
+                    Otherwise: extractive passages
 ```
 
 ```
@@ -76,7 +80,7 @@ The API is served at [http://127.0.0.1:8000](http://127.0.0.1:8000). Interactive
 | `POST` | `/api/v1/audio/transcribe` | Upload audio and return Whisper transcription |
 | `POST` | `/api/v1/documents/upload` | Upload `.txt`, `.md`, or `.pdf` and index it |
 | `GET` | `/api/v1/documents` | List indexed document filenames |
-| `POST` | `/api/v1/documents/query` | Retrieve extractive passages for a question |
+| `POST` | `/api/v1/documents/query` | Retrieve passages and return a grounded answer |
 
 Audio types: `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`.
 
@@ -119,11 +123,25 @@ You can optionally include a transcript so retrieval also searches speech text:
 
 The first embedding-model load may download MiniLM weights. Whisper `base` is loaded once and reused.
 
-## Why RAG is extractive, not generative
+## How grounded answers work
 
-`POST /api/v1/documents/query` returns the most similar stored passages joined together. It does **not** call an LLM to rewrite an answer. That keeps responses source-grounded and avoids hallucination until Phase 2.
+`POST /api/v1/documents/query` still retrieves the same passages. Then:
 
-Document scores come from Chroma L2 distance (`1 / (1 + distance)`). Optional transcript scores are cosine similarity. They are sorted together for the current API, but they are **not** on the same scale.
+1. If no passages are found, it refuses.
+2. If the best retrieval score is below `MIN_EVIDENCE_SCORE`, it refuses instead of guessing.
+3. If `OPENAI_API_KEY` is set, an LLM writes a short answer using **only** those passages and cites them as `Sources: [1], [2]`.
+4. If no API key is set, or the LLM call fails, it falls back to the previous extractive answer (`Based on the available sources:` plus the passages).
+
+The JSON now includes `mode`: `generative`, `extractive`, or `refused`. `question`, `answer`, and `sources` are unchanged.
+
+Add this to `.env` to enable generation (do not commit the key):
+
+```bash
+OPENAI_API_KEY=sk-your-key
+OPENAI_MODEL=gpt-4o-mini
+```
+
+Document scores come from Chroma L2 distance (`1 / (1 + distance)`). Optional transcript scores are cosine similarity. They are sorted together, but they are **not** on the same scale.
 
 ## Tests
 
@@ -132,16 +150,17 @@ source .venv/bin/activate
 pytest
 ```
 
-Tests mock Whisper, MiniLM, and Chroma at the service boundary. They use temporary directories and do not write into your real `data/` folders.
+Tests mock Whisper, MiniLM, Chroma, and the LLM HTTP call. They use temporary directories and do not write into your real `data/` folders.
 
 ## Current limitations
 
-- No LLM generation, LangChain, or LangGraph.
+- LLM answers need `OPENAI_API_KEY`. Without it, query stays extractive.
+- No LangChain or LangGraph yet.
 - No authentication, case IDs, or evidence audit trail.
 - No frontend, Docker, or CI/CD.
 - Health checks are liveness only; they do not verify model files.
 - Python 3.9.6; `requirements.txt` is a full environment freeze.
 
-## Planned Phase 2
+## Planned next
 
-Add source-grounded LLM answers on top of the current retriever: generate a short answer only from retrieved passages, include citations, and refuse when evidence is weak. Whisper, MiniLM, and Chroma stay in place.
+A small LangGraph workflow that ties one case together: transcribe → index → retrieve → grounded answer → citations. Whisper, MiniLM, and Chroma stay in place.
