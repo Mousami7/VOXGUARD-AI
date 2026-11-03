@@ -7,27 +7,25 @@ This repository is an independent portfolio project. It currently provides a Fas
 ## Current architecture
 
 ```
-Upload audio                    Upload document
-     |                                |
-     v                                v
-Whisper (`base`)                 Extract TXT/MD/PDF
-     |                                |
-     v                                v
-Transcript JSON                  Chunk + MiniLM embeddings
-                                      |
-                                      v
-                                 Persistent ChromaDB
-                                      |
-Ask a question -----------------------+
-                                      |
-                                      v
-                         Retrieve top-k passages
-                                      |
-                                      v
-                    If evidence is weak: refuse
-                    If OPENAI_API_KEY is set: grounded LLM answer
-                    Otherwise: extractive passages
+Create case
+     |
+     +-- upload audio ---- Whisper ---- store transcript ---- index (case-scoped)
+     |
+     +-- upload documents -- extract ---- index (case-scoped)
+     |
+     v
+Ask a question on that case
+     |
+     v
+Retrieve only that case's passages
+     |
+     v
+If evidence is weak: refuse
+If OPENAI_API_KEY is set: grounded LLM answer
+Otherwise: extractive passages
 ```
+
+Standalone `/api/v1/audio` and `/api/v1/documents` endpoints still work without a case.
 
 ```
 VoxGuard-AI/
@@ -40,7 +38,8 @@ VoxGuard-AI/
 ├── data/
 │   ├── audio/          # local audio (gitignored)
 │   ├── documents/      # uploaded documents (gitignored)
-│   └── chroma/         # vector store (gitignored)
+│   ├── chroma/         # vector store (gitignored)
+│   └── cases/          # case files and JSON store (gitignored)
 ├── tests/
 ├── .env.example
 ├── pytest.ini
@@ -81,6 +80,12 @@ The API is served at [http://127.0.0.1:8000](http://127.0.0.1:8000). Interactive
 | `POST` | `/api/v1/documents/upload` | Upload `.txt`, `.md`, or `.pdf` and index it |
 | `GET` | `/api/v1/documents` | List indexed document filenames |
 | `POST` | `/api/v1/documents/query` | Retrieve passages and return a grounded answer |
+| `POST` | `/api/v1/cases` | Create an investigation case |
+| `GET` | `/api/v1/cases` | List cases (no transcript text) |
+| `GET` | `/api/v1/cases/{id}` | Get one case, including transcript |
+| `POST` | `/api/v1/cases/{id}/audio` | Transcribe audio and index it for the case |
+| `POST` | `/api/v1/cases/{id}/documents` | Upload a document into the case |
+| `POST` | `/api/v1/cases/{id}/query` | Ask a question using only that case's evidence |
 
 Audio types: `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`.
 
@@ -104,7 +109,29 @@ curl -X POST "http://127.0.0.1:8000/api/v1/documents/query" \
   -d '{"question":"Where is visitor parking?"}'
 ```
 
-You can optionally include a transcript so retrieval also searches speech text:
+## Cases (audio + documents together)
+
+A case is one investigation, such as a claim file. Create a case, add one audio recording and one or more documents, then query that case. Retrieval is limited to that case's indexed transcript and documents.
+
+```bash
+CASE_ID=$(curl -s -X POST "http://127.0.0.1:8000/api/v1/cases" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Water leak claim"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+curl -X POST "http://127.0.0.1:8000/api/v1/cases/$CASE_ID/audio" \
+  -F "file=@data/audio/test.m4a"
+
+curl -X POST "http://127.0.0.1:8000/api/v1/cases/$CASE_ID/documents" \
+  -F "file=@data/documents/policy.txt"
+
+curl -X POST "http://127.0.0.1:8000/api/v1/cases/$CASE_ID/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Does the policy cover the damage described in the recording?"}'
+```
+
+A case accepts one transcript. Duplicate document names in the same case return HTTP 409. Case files are stored under `data/cases/` and are not committed.
+
+You can still query global documents and optionally include a transcript so retrieval also searches speech text:
 
 ```json
 {
@@ -163,4 +190,4 @@ Tests mock Whisper, MiniLM, Chroma, and the LLM HTTP call. They use temporary di
 
 ## Planned next
 
-A small LangGraph workflow that ties one case together: transcribe → index → retrieve → grounded answer → citations. Whisper, MiniLM, and Chroma stay in place.
+A LangGraph workflow that runs a case as explicit steps: transcribe → index → retrieve → grounded answer → citations. Whisper, MiniLM, Chroma, and the case API stay in place.

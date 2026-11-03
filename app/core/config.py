@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     audio_dir: Path = BASE_DIR / "data" / "audio"
     documents_dir: Path = BASE_DIR / "data" / "documents"
     chroma_dir: Path = BASE_DIR / "data" / "chroma"
+    cases_dir: Path = BASE_DIR / "data" / "cases"
 
     whisper_model: str = "base"
     embedding_model: str = "all-MiniLM-L6-v2"

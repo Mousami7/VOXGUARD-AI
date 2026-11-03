@@ -83,15 +83,29 @@ def _cosine_similarity(query_vector: Any, chunk_vectors: Any) -> List[float]:
     return scores.tolist()
 
 
-def _delete_document_chunks(filename: str) -> None:
+def _chunk_where(filename: str, case_id: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "$and": [
+            {"filename": filename},
+            {"case_id": case_id or ""},
+        ]
+    }
+
+
+def _delete_document_chunks(filename: str, case_id: Optional[str] = None) -> None:
     collection = get_collection()
-    existing = collection.get(where={"filename": filename})
+    existing = collection.get(where=_chunk_where(filename, case_id))
     ids = existing.get("ids") if existing else None
     if ids:
         collection.delete(ids=ids)
 
 
-def index_document(filename: str, text: str) -> int:
+def index_document(
+    filename: str,
+    text: str,
+    case_id: Optional[str] = None,
+    source: Optional[str] = None,
+) -> int:
     """Split a document into chunks, embed them, and store them."""
     chunks = chunk_text(text)
     if not chunks:
@@ -101,10 +115,18 @@ def index_document(filename: str, text: str) -> int:
     model = get_embedding_model()
     collection = get_collection()
     embeddings = model.encode(chunks).tolist()
-    ids = [f"{filename}::{index}" for index in range(len(chunks))]
-    metadatas = [{"filename": filename, "source": filename} for _ in chunks]
+    prefix = "case::{case_id}::".format(case_id=case_id) if case_id else ""
+    ids = ["{prefix}{filename}::{index}".format(prefix=prefix, filename=filename, index=index) for index in range(len(chunks))]
+    metadatas = [
+        {
+            "filename": filename,
+            "source": source or filename,
+            "case_id": case_id or "",
+        }
+        for _ in chunks
+    ]
 
-    _delete_document_chunks(filename)
+    _delete_document_chunks(filename, case_id)
     try:
         collection.add(
             ids=ids,
@@ -113,7 +135,7 @@ def index_document(filename: str, text: str) -> int:
             metadatas=metadatas,
         )
     except Exception:
-        _delete_document_chunks(filename)
+        _delete_document_chunks(filename, case_id)
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         logger.exception(
             "document_index_failed error_category=indexing filename=%s duration_ms=%s",
@@ -132,28 +154,51 @@ def index_document(filename: str, text: str) -> int:
     return len(chunks)
 
 
-def list_indexed_documents() -> List[str]:
+def list_indexed_documents(case_id: Optional[str] = None) -> List[str]:
     collection = get_collection()
     stored = collection.get()
     filenames: List[str] = []
     for metadata in stored.get("metadatas") or []:
         name = metadata.get("filename")
-        if name and name not in filenames:
+        meta_case = metadata.get("case_id") or ""
+        if not name:
+            continue
+        if case_id is None and meta_case:
+            continue
+        if case_id is not None and meta_case != case_id:
+            continue
+        if name not in filenames:
             filenames.append(name)
     return filenames
 
 
-def _search_documents(question: str, top_k: int) -> List[Dict[str, Any]]:
+def _search_documents(
+    question: str,
+    top_k: int,
+    case_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     collection = get_collection()
     if collection.count() == 0:
         return []
+
+    query_kwargs: Dict[str, Any] = {}
+    if case_id:
+        scoped = collection.get(where={"case_id": case_id})
+        scoped_ids = scoped.get("ids") or []
+        if not scoped_ids:
+            return []
+        query_kwargs["where"] = {"case_id": case_id}
+        n_results = min(top_k, len(scoped_ids))
+    else:
+        n_results = min(top_k, collection.count())
 
     model = get_embedding_model()
     query_embedding = model.encode([question]).tolist()
     results = collection.query(
         query_embeddings=query_embedding,
-        n_results=min(top_k, collection.count()),
+        n_results=n_results,
         include=["documents", "metadatas", "distances"],
+        **query_kwargs,
     )
 
     matches: List[Dict[str, Any]] = []
@@ -214,6 +259,7 @@ def query_knowledge(
     question: str,
     top_k: int = 4,
     transcription: Optional[str] = None,
+    case_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Retrieve passages, then optionally generate a grounded LLM answer.
 
@@ -223,7 +269,7 @@ def query_knowledge(
     """
     started = time.perf_counter()
     try:
-        matches = _search_documents(question, top_k)
+        matches = _search_documents(question, top_k, case_id=case_id)
 
         if transcription and transcription.strip():
             matches.extend(_search_transcription(question, transcription, top_k))
